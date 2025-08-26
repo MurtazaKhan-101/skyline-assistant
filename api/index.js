@@ -15,6 +15,7 @@ const authRoutes = require("../routes/authRoutes");
 const taskRoutes = require("../routes/taskRoutes");
 const gmailRoutes = require("../routes/gmailRoutes");
 const calendarRoutes = require("../routes/calendarRoutes");
+const tasksRoutes = require("../routes/tasksRoutes");
 
 // Import middleware
 const errorHandler = require("../middleware/errorHandler");
@@ -82,6 +83,7 @@ app.use(express.static("public"));
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/tasks", taskRoutes);
+app.use("/api/gtasks", tasksRoutes);
 app.use("/api/gmail", gmailRoutes);
 app.use("/api/calendar", calendarRoutes);
 
@@ -134,6 +136,18 @@ app.get("/api", (req, res) => {
         "DELETE /api/calendar/events/:id": "Delete calendar event",
         "GET /api/calendar/today": "Get today's events",
         "GET /api/calendar/upcoming": "Get upcoming events",
+      },
+      gtasks: {
+        "GET /api/gtasks/lists": "Get Google task lists",
+        "POST /api/gtasks/lists": "Create Google task list",
+        "GET /api/gtasks/:tasklistId?": "Get Google tasks from list",
+        "POST /api/gtasks/:tasklistId?": "Create Google task",
+        "PUT /api/gtasks/:tasklistId/:taskId": "Update Google task",
+        "DELETE /api/gtasks/:tasklistId/:taskId": "Delete Google task",
+        "POST /api/gtasks/:tasklistId/:taskId/move": "Move Google task",
+        "PATCH /api/gtasks/:tasklistId/:taskId/toggle":
+          "Toggle task completion",
+        "DELETE /api/gtasks/:tasklistId/clear": "Clear completed tasks",
       },
     },
   });

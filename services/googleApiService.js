@@ -231,6 +231,208 @@ class GoogleApiService {
       throw error;
     }
   }
+
+  // ========================
+  // GOOGLE TASKS METHODS
+  // ========================
+
+  async getTaskLists(userId) {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      const response = await tasks.tasklists.list();
+      return response.data.items || [];
+    } catch (error) {
+      console.error("Error fetching task lists:", error);
+      throw error;
+    }
+  }
+
+  async createTaskList(userId, title) {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      const response = await tasks.tasklists.insert({
+        requestBody: {
+          title,
+        },
+      });
+
+      return response.data;
+    } catch (error) {
+      console.error("Error creating task list:", error);
+      throw error;
+    }
+  }
+
+  async getTasks(userId, tasklistId = "@default", options = {}) {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      const queryParams = {
+        tasklist: tasklistId,
+        maxResults: options.maxResults || 100,
+        showCompleted: options.showCompleted !== false,
+        showDeleted: options.showDeleted || false,
+        showHidden: options.showHidden || false,
+      };
+
+      if (options.completedMin) {
+        queryParams.completedMin = options.completedMin;
+      }
+      if (options.completedMax) {
+        queryParams.completedMax = options.completedMax;
+      }
+      if (options.dueMin) {
+        queryParams.dueMin = options.dueMin;
+      }
+      if (options.dueMax) {
+        queryParams.dueMax = options.dueMax;
+      }
+      if (options.updatedMin) {
+        queryParams.updatedMin = options.updatedMin;
+      }
+
+      const response = await tasks.tasks.list(queryParams);
+      return response.data.items || [];
+    } catch (error) {
+      console.error("Error fetching tasks:", error);
+      throw error;
+    }
+  }
+
+  async createTask(userId, taskData, tasklistId = "@default") {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      const response = await tasks.tasks.insert({
+        tasklist: tasklistId,
+        requestBody: taskData,
+      });
+
+      return response.data;
+    } catch (error) {
+      console.error("Error creating task:", error);
+      throw error;
+    }
+  }
+
+  async updateTask(userId, taskId, taskData, tasklistId = "@default") {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      // Include the task ID in the request body as required by Google Tasks API
+      const taskDataWithId = {
+        id: taskId,
+        ...taskData,
+      };
+
+      // Use requestBody parameter with task ID included in the body
+      const response = await tasks.tasks.update({
+        tasklist: tasklistId,
+        task: taskId,
+        requestBody: taskDataWithId,
+      });
+
+      return response.data;
+    } catch (error) {
+      console.error("Error updating task:", error);
+      throw error;
+    }
+  }
+
+  async deleteTask(userId, taskId, tasklistId = "@default") {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      await tasks.tasks.delete({
+        tasklist: tasklistId,
+        task: taskId,
+      });
+
+      return { success: true, message: "Task deleted successfully" };
+    } catch (error) {
+      console.error("Error deleting task:", error);
+      throw error;
+    }
+  }
+
+  async moveTask(
+    userId,
+    taskId,
+    parentId,
+    previousId,
+    tasklistId = "@default"
+  ) {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      const moveParams = {
+        tasklist: tasklistId,
+        task: taskId,
+      };
+
+      if (parentId) {
+        moveParams.parent = parentId;
+      }
+      if (previousId) {
+        moveParams.previous = previousId;
+      }
+
+      const response = await tasks.tasks.move(moveParams);
+      return response.data;
+    } catch (error) {
+      console.error("Error moving task:", error);
+      throw error;
+    }
+  }
+
+  async clearTaskList(userId, tasklistId) {
+    try {
+      await this.setupClient(userId);
+      const tasks = google.tasks({
+        version: "v1",
+        auth: this.oauth2Client,
+      });
+
+      await tasks.tasks.clear({
+        tasklist: tasklistId,
+      });
+
+      return { success: true, message: "Task list cleared successfully" };
+    } catch (error) {
+      console.error("Error clearing task list:", error);
+      throw error;
+    }
+  }
 }
 
 module.exports = new GoogleApiService();
