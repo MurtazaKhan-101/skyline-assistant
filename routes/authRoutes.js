@@ -12,6 +12,20 @@ const {
 } = require("../controllers/authController");
 const { protect } = require("../middleware/auth");
 
+// Import middleware with fallback for Vercel compatibility
+let authRateLimit, performanceMonitor;
+try {
+  const rateLimiter = require("../middleware/rateLimiter");
+  const performance = require("../middleware/performance");
+  authRateLimit = rateLimiter.authRateLimit;
+  performanceMonitor = performance.performanceMonitor;
+} catch (error) {
+  console.warn("Using fallback middleware for Vercel deployment");
+  const fallback = require("../middleware/vercelFallback");
+  authRateLimit = fallback.authRateLimit;
+  performanceMonitor = fallback.performanceMonitor;
+}
+
 const router = express.Router();
 
 // Validation middleware
@@ -37,9 +51,24 @@ const loginValidation = [
   body("password").notEmpty().withMessage("Password is required"),
 ];
 
-// Routes
-router.post("/register", registerValidation, register);
-router.post("/login", loginValidation, login);
+// Apply middleware (with safety checks)
+if (performanceMonitor) {
+  router.use(performanceMonitor);
+}
+
+// Routes (with rate limiting applied selectively)
+router.post(
+  "/register",
+  authRateLimit || ((req, res, next) => next()),
+  registerValidation,
+  register
+);
+router.post(
+  "/login",
+  authRateLimit || ((req, res, next) => next()),
+  loginValidation,
+  login
+);
 router.get("/me", protect, getMe);
 
 // Google OAuth routes
@@ -57,6 +86,29 @@ router.get(
       "https://www.googleapis.com/auth/tasks",
       "https://www.googleapis.com/auth/tasks.readonly",
     ],
+    accessType: "offline", // ✅ CRITICAL: Forces refresh token
+    prompt: "consent", // ✅ CRITICAL: Always asks for consent
+  })
+);
+
+// Alternative route for forced re-authentication
+router.get(
+  "/google/reauth",
+  passport.authenticate("google", {
+    scope: [
+      "profile",
+      "email",
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/calendar.readonly",
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/tasks",
+      "https://www.googleapis.com/auth/tasks.readonly",
+    ],
+    accessType: "offline",
+    prompt: "consent",
+    approvalPrompt: "force", // Force approval prompt
   })
 );
 

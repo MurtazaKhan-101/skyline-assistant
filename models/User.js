@@ -49,16 +49,22 @@ const userSchema = new mongoose.Schema(
     googleTokens: {
       accessToken: {
         type: String,
-        select: false, // Don't include in queries by default for security
       },
       refreshToken: {
         type: String,
-        select: false,
       },
       tokenType: {
         type: String,
         default: "Bearer",
       },
+      accessTokenExpiry: {
+        type: Date,
+      },
+      refreshTokenExpiry: {
+        type: Date,
+        default: null, // Refresh tokens don't have fixed expiry
+      },
+      // Keep the old field for backward compatibility
       expiryDate: {
         type: Date,
       },
@@ -98,6 +104,16 @@ userSchema.pre("save", async function (next) {
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
+
+// Create indexes for better query performance
+userSchema.index({ email: 1 }); // For login queries
+userSchema.index({ googleId: 1 }); // For Google OAuth queries
+userSchema.index({ isActive: 1 }); // For filtering active users
+userSchema.index({ lastLogin: -1 }); // For sorting by last login
+userSchema.index({ "googleTokens.expiryDate": 1 }); // For token expiry checks
+
+// Compound index for common query patterns
+userSchema.index({ email: 1, isActive: 1 });
 
 // Instance method to check password
 userSchema.methods.correctPassword = async function (

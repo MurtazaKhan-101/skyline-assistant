@@ -10,6 +10,28 @@ const {
 } = require("../controllers/calendarController");
 const { protect } = require("../middleware/auth");
 
+// Import middleware with fallback for Vercel compatibility
+let calendarRateLimit,
+  calendarCacheMiddleware,
+  invalidateCalendarCache,
+  performanceMonitor;
+try {
+  const rateLimiter = require("../middleware/rateLimiter");
+  const cache = require("../middleware/cache");
+  const performance = require("../middleware/performance");
+  calendarRateLimit = rateLimiter.calendarRateLimit;
+  calendarCacheMiddleware = cache.calendarCacheMiddleware;
+  invalidateCalendarCache = cache.invalidateCalendarCache;
+  performanceMonitor = performance.performanceMonitor;
+} catch (error) {
+  console.warn("Using fallback middleware for Vercel deployment");
+  const fallback = require("../middleware/vercelFallback");
+  calendarRateLimit = fallback.calendarRateLimit;
+  calendarCacheMiddleware = fallback.calendarCacheMiddleware;
+  invalidateCalendarCache = fallback.invalidateCalendarCache;
+  performanceMonitor = fallback.performanceMonitor;
+}
+
 const router = express.Router();
 
 // Event validation middleware
@@ -58,17 +80,49 @@ const createEventValidation = [
   ...eventValidation.slice(2), // Include optional validations
 ];
 
-// All routes are protected
+// All routes are protected (with safety checks)
 router.use(protect);
+if (calendarRateLimit) {
+  router.use(calendarRateLimit);
+}
+if (performanceMonitor) {
+  router.use(performanceMonitor);
+}
 
 // Routes
-router.get("/events", getEvents);
-router.post("/events", createEventValidation, createEvent);
-router.put("/events/:eventId", eventValidation, updateEvent);
-router.delete("/events/:eventId", deleteEvent);
+router.get(
+  "/events",
+  calendarCacheMiddleware || ((req, res, next) => next()),
+  getEvents
+);
+router.post(
+  "/events",
+  invalidateCalendarCache || ((req, res, next) => next()),
+  createEventValidation,
+  createEvent
+);
+router.put(
+  "/events/:eventId",
+  invalidateCalendarCache || ((req, res, next) => next()),
+  eventValidation,
+  updateEvent
+);
+router.delete(
+  "/events/:eventId",
+  invalidateCalendarCache || ((req, res, next) => next()),
+  deleteEvent
+);
 
 // Special routes
-router.get("/today", getTodayEvents);
-router.get("/upcoming", getUpcomingEvents);
+router.get(
+  "/today",
+  calendarCacheMiddleware || ((req, res, next) => next()),
+  getTodayEvents
+);
+router.get(
+  "/upcoming",
+  calendarCacheMiddleware || ((req, res, next) => next()),
+  getUpcomingEvents
+);
 
 module.exports = router;

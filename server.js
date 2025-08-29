@@ -3,7 +3,9 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const compression = require("compression");
 const session = require("express-session");
+const MongoStore = require("connect-mongo");
 const passport = require("./config/passport");
 require("dotenv").config();
 
@@ -16,26 +18,50 @@ const taskRoutes = require("./routes/taskRoutes");
 const gmailRoutes = require("./routes/gmailRoutes");
 const calendarRoutes = require("./routes/calendarRoutes");
 const tasksRoutes = require("./routes/tasksRoutes"); // Google Tasks API routes
+const healthRoutes = require("./routes/healthRoutes");
 
 // Import middleware
 const errorHandler = require("./middleware/errorHandler");
+const { performanceMonitor } = require("./middleware/performance");
 
-// Connect to MongoDB
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => console.log("Connected to MongoDB"))
-  .catch((error) => console.error("MongoDB connection error:", error));
+// Connect to MongoDB with optimized connection
+const connectDB = require("./config/database");
 
-// Session configuration for Passport
+// Initialize database connection
+async function initDB() {
+  await connectDB().catch((err) => {
+    console.error("Failed to connect to MongoDB:", err);
+    if (!process.env.VERCEL) {
+      process.exit(1);
+    }
+  });
+}
+
+initDB();
+
+// Session configuration for Passport with MongoDB store
 app.use(
   session({
     secret: process.env.JWT_SECRET,
     resave: false,
     saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: process.env.MONGODB_URI,
+      touchAfter: 24 * 3600, // Lazy session update
+      ttl: 24 * 60 * 60, // Session TTL in seconds (24 hours)
+      autoRemove: "native", // Let MongoDB handle expired session removal
+      crypto: {
+        secret: process.env.JWT_SECRET,
+      },
+    }),
     cookie: {
-      secure: process.env.NODE_ENV === "production",
+      secure:
+        process.env.NODE_ENV === "production" && !process.env.LOCAL_PRODUCTION, // Allow HTTP in local production testing
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      httpOnly: true, // Prevent XSS attacks
+      sameSite: process.env.NODE_ENV === "production" ? "lax" : false, // CSRF protection
     },
+    name: "skyline.sid", // Custom session name for better security
   })
 );
 
@@ -43,18 +69,60 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Middleware
+// Performance Middleware (applied globally with safety check)
+app.use(compression()); // Compress all responses
+if (performanceMonitor) {
+  app.use(performanceMonitor); // Monitor all requests
+}
+
+// Security and CORS Middleware
 app.use(helmet()); // Security headers
 app.use(
   cors({
-    origin:
-      process.env.NODE_ENV === "production"
-        ? ["https://your-frontend-domain.com"]
-        : ["http://localhost:3000", "http://localhost:3001"],
+    origin: function (origin, callback) {
+      // Allow localhost in development or local production testing
+      const allowedOrigins = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+      ];
+
+      // Add production domain if specified in environment
+      if (process.env.FRONTEND_URL) {
+        allowedOrigins.push(process.env.FRONTEND_URL);
+      }
+
+      // For production, add your actual domain
+      if (
+        process.env.NODE_ENV === "production" &&
+        !process.env.LOCAL_PRODUCTION
+      ) {
+        allowedOrigins.push("https://your-frontend-domain.com");
+      }
+
+      // Allow requests with no origin (mobile apps, curl, etc.)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.warn(`CORS blocked origin: ${origin}`);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 ); // Enable CORS
-app.use(morgan("combined")); // Logging
+
+// Logging (optimized for production)
+if (process.env.NODE_ENV === "production") {
+  app.use(morgan("combined"));
+} else {
+  app.use(morgan("dev"));
+}
+
+// Body parsing middleware
 app.use(express.json({ limit: "10mb" })); // Parse JSON bodies
 app.use(express.urlencoded({ extended: true })); // Parse URL-encoded bodies
 
@@ -62,6 +130,7 @@ app.use(express.urlencoded({ extended: true })); // Parse URL-encoded bodies
 app.use(express.static("public"));
 
 // Routes
+app.use("/api/health", healthRoutes); // Health check routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/tasks", taskRoutes); // Local tasks (MongoDB)
@@ -69,7 +138,7 @@ app.use("/api/gtasks", tasksRoutes); // Google Tasks API
 app.use("/api/gmail", gmailRoutes);
 app.use("/api/calendar", calendarRoutes);
 
-// Health check endpoint
+// Simple health check endpoint for load balancers
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "OK",

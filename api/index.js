@@ -1,9 +1,10 @@
 const express = require("express");
-const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const compression = require("compression");
 const session = require("express-session");
+const MongoStore = require("connect-mongo");
 const passport = require("../config/passport");
 require("dotenv").config();
 
@@ -16,44 +17,56 @@ const taskRoutes = require("../routes/taskRoutes");
 const gmailRoutes = require("../routes/gmailRoutes");
 const calendarRoutes = require("../routes/calendarRoutes");
 const tasksRoutes = require("../routes/tasksRoutes");
+const healthRoutes = require("../routes/healthRoutes");
 
 // Import middleware
 const errorHandler = require("../middleware/errorHandler");
 
-let dbStatus = "Not connected";
-async function connectToDatabase() {
-  if (mongoose.connection.readyState === 1) {
-    dbStatus = "Connected";
-    return;
-  }
-  try {
-    await mongoose.connect(process.env.MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000,
-    });
-    dbStatus = "Connected";
-    console.log("✅ Connected to MongoDB");
-  } catch (error) {
-    dbStatus = "Connection error: " + error.message;
-    console.error("❌ MongoDB connection error:", error);
-  }
+// Import optimized middleware (with graceful fallbacks for Vercel)
+let performanceMiddleware;
+try {
+  performanceMiddleware =
+    require("../middleware/performance").performanceMiddleware;
+} catch (error) {
+  console.warn("Performance middleware not available, using fallback");
+  performanceMiddleware = (req, res, next) => next();
 }
-connectToDatabase();
-// Connect to MongoDB
-// mongoose
-//   .connect(process.env.MONGODB_URI)
-//   .then(() => console.log("Connected to MongoDB"))
-//   .catch((error) => console.error("MongoDB connection error:", error));
 
-// Session configuration for Passport
+const connectDB = require("../config/database");
+
+// Initialize database connection
+(async () => {
+  await connectDB().catch((err) => {
+    console.error("Failed to connect to MongoDB:", err);
+    if (!process.env.VERCEL) {
+      process.exit(1);
+    }
+  });
+})();
+
+// Session configuration for Passport with MongoDB store
 app.use(
   session({
     secret: process.env.JWT_SECRET,
     resave: false,
     saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: process.env.MONGODB_URI,
+      touchAfter: 24 * 3600, // Lazy session update
+      ttl: 24 * 60 * 60, // Session TTL in seconds (24 hours)
+      autoRemove: "native", // Let MongoDB handle expired session removal
+      crypto: {
+        secret: process.env.JWT_SECRET,
+      },
+    }),
     cookie: {
-      secure: process.env.NODE_ENV === "production",
+      secure:
+        process.env.NODE_ENV === "production" && !process.env.LOCAL_PRODUCTION, // Allow HTTP in local production testing
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      httpOnly: true, // Prevent XSS attacks
+      sameSite: process.env.NODE_ENV === "production" ? "lax" : false, // CSRF protection
     },
+    name: "skyline.sid", // Custom session name for better security
   })
 );
 
@@ -61,25 +74,66 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Middleware
+// Performance middleware (applied early for Vercel)
+app.use(compression()); // Compress all responses
+app.use(performanceMiddleware); // Monitor performance
+
+// Security and CORS middleware
 app.use(helmet()); // Security headers
 app.use(
   cors({
-    origin:
-      process.env.NODE_ENV === "production"
-        ? ["https://your-frontend-domain.com"]
-        : ["http://localhost:3000", "http://localhost:3001"],
+    origin: function (origin, callback) {
+      // Allow localhost in development or local production testing
+      const allowedOrigins = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+      ];
+
+      // Add production domain if specified in environment
+      if (process.env.FRONTEND_URL) {
+        allowedOrigins.push(process.env.FRONTEND_URL);
+      }
+
+      // For production, add your actual domain
+      if (
+        process.env.NODE_ENV === "production" &&
+        !process.env.LOCAL_PRODUCTION
+      ) {
+        allowedOrigins.push("https://your-frontend-domain.com");
+      }
+
+      // Allow requests with no origin (mobile apps, curl, etc.)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.warn(`CORS blocked origin: ${origin}`);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
-); // Enable CORS
-app.use(morgan("combined")); // Logging
-app.use(express.json({ limit: "10mb" })); // Parse JSON bodies
-app.use(express.urlencoded({ extended: true })); // Parse URL-encoded bodies
+);
+
+// Optimized logging for serverless
+if (process.env.NODE_ENV === "production") {
+  app.use(morgan("combined"));
+} else {
+  app.use(morgan("dev"));
+}
+
+// Body parsing middleware
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 // Serve static files
 app.use(express.static("public"));
 
 // Routes
+app.use("/api/health", healthRoutes); // Health check routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/tasks", taskRoutes);
@@ -88,67 +142,135 @@ app.use("/api/gmail", gmailRoutes);
 app.use("/api/calendar", calendarRoutes);
 
 app.get("/", async (req, res) => {
-  // Ensure DB connection attempt happens on each cold start
-  await connectToDatabase();
+  // Get database status from the optimized connection
+  const mongoose = require("mongoose");
+  const dbState = mongoose.connection.readyState;
+  const dbStatus =
+    dbState === 1
+      ? "Connected"
+      : dbState === 0
+      ? "Disconnected"
+      : dbState === 2
+      ? "Connecting"
+      : "Disconnecting";
 
   res.json({
     status: "OK",
-    message: "Skyline Assistant",
+    message: "Skyline Assistant - Optimized for Vercel",
     timestamp: new Date().toISOString(),
     database: dbStatus,
+    performance: "Optimized with caching, compression, and rate limiting",
+    version: "2.0.0",
   });
 });
 
-// Health check endpoint
+// Simple health check endpoint for load balancers
 app.get("/health", (req, res) => {
+  const mongoose = require("mongoose");
+  const dbState = mongoose.connection.readyState;
+
   res.status(200).json({
     status: "OK",
-    message: "Skyline Assistant Backend is running",
+    message: "Skyline Assistant Backend - Vercel Optimized",
     timestamp: new Date().toISOString(),
-    version: "1.0.0",
+    version: "2.0.0",
+    database: dbState === 1 ? "Connected" : "Disconnected",
+    optimizations: [
+      "compression",
+      "caching",
+      "rate-limiting",
+      "connection-pooling",
+    ],
   });
 });
 
 // API documentation endpoint
 app.get("/api", (req, res) => {
   res.status(200).json({
-    message: "Skyline Assistant API",
-    version: "1.0.0",
+    message: "Skyline Assistant API - Vercel Optimized",
+    version: "2.0.0",
+    optimizations: [
+      "Response compression with gzip",
+      "Multi-level caching (emails, calendar, tasks, tokens)",
+      "Rate limiting per endpoint type",
+      "Connection pooling for Google APIs",
+      "Database query optimization",
+      "Performance monitoring",
+    ],
     endpoints: {
+      health: {
+        "GET /health": "Simple health check for load balancers",
+        "GET /api/health": "Basic health information",
+        "GET /api/health/detailed": "Comprehensive system metrics",
+      },
       auth: {
         "POST /api/auth/register": "Register with email/password",
-        "POST /api/auth/login": "Login with email/password",
+        "POST /api/auth/login":
+          "Login with email/password (rate limited: 5/15min)",
         "GET /api/auth/google": "Login with Google OAuth",
         "GET /api/auth/me": "Get current user info",
         "GET /api/auth/google/profile": "Get Google profile info",
         "DELETE /api/auth/google/disconnect": "Disconnect Google account",
       },
       gmail: {
-        "GET /api/gmail/profile": "Get Gmail profile",
-        "GET /api/gmail/emails": "Get emails",
-        "GET /api/gmail/search": "Search emails",
-        "POST /api/gmail/send": "Send email",
+        "GET /api/gmail/profile":
+          "Get Gmail profile (cached 2min, rate limited: 30/min)",
+        "GET /api/gmail/emails":
+          "Get emails (cached 2min, rate limited: 30/min)",
+        "GET /api/gmail/search":
+          "Search emails (cached 2min, rate limited: 30/min)",
+        "POST /api/gmail/send": "Send email (rate limited: 30/min)",
       },
       calendar: {
-        "GET /api/calendar/events": "Get calendar events",
-        "POST /api/calendar/events": "Create calendar event",
-        "PUT /api/calendar/events/:id": "Update calendar event",
-        "DELETE /api/calendar/events/:id": "Delete calendar event",
-        "GET /api/calendar/today": "Get today's events",
-        "GET /api/calendar/upcoming": "Get upcoming events",
+        "GET /api/calendar/events":
+          "Get calendar events (cached 5min, rate limited: 20/min)",
+        "POST /api/calendar/events":
+          "Create calendar event (invalidates cache, rate limited: 20/min)",
+        "PUT /api/calendar/events/:id":
+          "Update calendar event (invalidates cache, rate limited: 20/min)",
+        "DELETE /api/calendar/events/:id":
+          "Delete calendar event (invalidates cache, rate limited: 20/min)",
+        "GET /api/calendar/today":
+          "Get today's events (cached 5min, rate limited: 20/min)",
+        "GET /api/calendar/upcoming":
+          "Get upcoming events (cached 5min, rate limited: 20/min)",
       },
       gtasks: {
-        "GET /api/gtasks/lists": "Get Google task lists",
-        "POST /api/gtasks/lists": "Create Google task list",
-        "GET /api/gtasks/:tasklistId?": "Get Google tasks from list",
-        "POST /api/gtasks/:tasklistId?": "Create Google task",
-        "PUT /api/gtasks/:tasklistId/:taskId": "Update Google task",
-        "DELETE /api/gtasks/:tasklistId/:taskId": "Delete Google task",
-        "POST /api/gtasks/:tasklistId/:taskId/move": "Move Google task",
+        "GET /api/gtasks/lists": "Get Google task lists (rate limited: 50/min)",
+        "POST /api/gtasks/lists":
+          "Create Google task list (rate limited: 50/min)",
+        "GET /api/gtasks/:tasklistId?":
+          "Get Google tasks from list (cached 3min, rate limited: 50/min)",
+        "POST /api/gtasks/:tasklistId?":
+          "Create Google task (invalidates cache, rate limited: 50/min)",
+        "PUT /api/gtasks/:tasklistId/:taskId":
+          "Update Google task (invalidates cache, rate limited: 50/min)",
+        "DELETE /api/gtasks/:tasklistId/:taskId":
+          "Delete Google task (invalidates cache, rate limited: 50/min)",
+        "POST /api/gtasks/:tasklistId/:taskId/move":
+          "Move Google task (invalidates cache, rate limited: 50/min)",
         "PATCH /api/gtasks/:tasklistId/:taskId/toggle":
-          "Toggle task completion",
-        "DELETE /api/gtasks/:tasklistId/clear": "Clear completed tasks",
+          "Toggle task completion (invalidates cache, rate limited: 50/min)",
+        "DELETE /api/gtasks/:tasklistId/clear":
+          "Clear completed tasks (invalidates cache, rate limited: 50/min)",
       },
+    },
+    performance: {
+      caching: {
+        emails: "2 minute TTL",
+        calendar: "5 minute TTL",
+        tasks: "3 minute TTL",
+        tokens: "50 minute TTL",
+      },
+      rateLimits: {
+        auth: "5 requests per 15 minutes",
+        gmail: "30 requests per minute",
+        calendar: "20 requests per minute",
+        tasks: "50 requests per minute",
+      },
+      database: "Connection pooling with MongoDB",
+      compression: "gzip compression on all responses",
+      monitoring: "Real-time performance metrics available",
     },
   });
 });
@@ -158,16 +280,21 @@ app.use("*", (req, res) => {
   res.status(404).json({
     success: false,
     message: "Route not found",
+    availableEndpoints: [
+      "GET /",
+      "GET /health",
+      "GET /api",
+      "GET /api/health",
+      "POST /api/auth/*",
+      "GET /api/gmail/*",
+      "GET /api/calendar/*",
+      "GET /api/gtasks/*",
+    ],
   });
 });
 
 // Error handling middleware
 app.use(errorHandler);
-
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: "Route not found" });
-});
 
 // Export for Vercel - this is critical for serverless function
 module.exports = app;
